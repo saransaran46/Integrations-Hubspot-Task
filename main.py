@@ -11,7 +11,7 @@ app = FastAPI()
 
 origins = [
     "http://localhost:3000",
-    "http://localhost:3001",  # React app address
+    "http://localhost:3001",
 ]
 
 
@@ -88,8 +88,6 @@ async def get_hubspot_credentials_integration(user_id: str = Form(...), org_id: 
     response = await get_hubspot_credentials(user_id, org_id)
     return add_cors_headers(response)
 
-@app.post('/integrations/hubspot/get_hubspot_items')
+@app.post('/integrations/hubspot/load')
 async def load_slack_data_integration(credentials: str = Form(...)):
-    response = await get_items_hubspot(credentials)
-    return add_cors_headers(response)
-    # return await get_items_hubspot(credentials)
+    return await get_items_hubspot(credentials)

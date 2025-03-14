@@ -10,7 +10,6 @@ from fastapi.responses import HTMLResponse
 from redis_client import add_key_value_redis, get_value_redis, delete_key_redis
 from integrations.integration_item import IntegrationItem
 
-# HubSpot OAuth Credentials (Replace with actual values)
 CLIENT_ID = '0fe9aea8-6f3a-45fb-b86f-daacfe08a67a'
 CLIENT_SECRET = '62b49673-f66d-4d06-b365-0296ab0ad307'
 REDIRECT_URI = 'http://localhost:8000/integrations/hubspot/oauth2callback'
@@ -54,6 +53,7 @@ async def get_hubspot_credentials(user_id, org_id):
         raise HTTPException(status_code=400, detail='No credentials found. Please reauthorize.')
 
     return json.loads(credentials)
+
 
 
 
@@ -110,188 +110,46 @@ async def oauth2callback_hubspot(request: Request):
     return HTMLResponse(content="<html><script>window.close();</script></html>")
 
 
-async def refresh_hubspot_token(user_id, org_id):
+
+async def get_hubspot_credentials(user_id: str, org_id: str) -> dict:
     """
-    Refresh HubSpot OAuth token if expired.
+    Retrieve stored HubSpot OAuth credentials from Redis.
     """
-    credentials = await get_hubspot_credentials(user_id, org_id)
-    refresh_token = credentials.get("refresh_token")
+    credentials = await get_value_redis(f'hubspot_credentials:{org_id}:{user_id}')
+    if not credentials:
+        raise HTTPException(status_code=400, detail='No credentials found. Please reauthorize.')
 
-    if not refresh_token:
-        raise HTTPException(status_code=400, detail="No refresh token available.")
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            TOKEN_URL,
-            data={
-                'grant_type': 'refresh_token',
-                'client_id': CLIENT_ID,
-                'client_secret': CLIENT_SECRET,
-                'refresh_token': refresh_token
-            },
-            headers={'Content-Type': 'application/x-www-form-urlencoded'}
-        )
-
-    if response.status_code != 200:
-        raise HTTPException(status_code=response.status_code, detail="Failed to refresh access token")
-
-    new_credentials = response.json()
-    new_credentials["user_id"] = user_id
-    new_credentials["org_id"] = org_id
-
-    await add_key_value_redis(f'hubspot_credentials:{org_id}:{user_id}', json.dumps(new_credentials), expire=new_credentials.get("expires_in", 3600))
-
-    return new_credentials
+    return json.loads(credentials)
 
 
-async def get_items_hubspot(user_id, org_id):
+async def get_items_hubspot(credentials: dict) -> list[IntegrationItem]:
     """
-    Fetch contacts from HubSpot using stored credentials.
+    Retrieve contacts from HubSpot.
     """
-    stored_credentials = await get_hubspot_credentials(user_id, org_id)
-    access_token = stored_credentials.get("access_token")
-
-    if not access_token:
-        raise HTTPException(status_code=401, detail="Invalid access token. Try reauthorizing.")
-
+    credentials = json.loads(credentials)
     async with httpx.AsyncClient() as client:
         response = await client.get(
             "https://api.hubapi.com/crm/v3/objects/contacts",
-            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+            headers={
+                'Authorization': f'Bearer {credentials.get("access_token")}',
+                'Content-Type': 'application/json'
+            },
         )
 
-        if response.status_code == 401:
-            stored_credentials = await refresh_hubspot_token(user_id, org_id)
-            access_token = stored_credentials.get("access_token")
-
-            response = await client.get(
-                "https://api.hubapi.com/crm/v3/objects/contacts",
-                headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-            )
-
     if response.status_code != 200:
-        raise HTTPException(status_code=response.status_code, detail="Failed to fetch items from HubSpot")
+        raise HTTPException(status_code=response.status_code, detail="Failed to fetch contacts.")
 
-    return response.json().get("results", [])
+    contacts = response.json().get("results", [])
+    list_of_integration_item_metadata = [
+        IntegrationItem(
+            id=contact.get("id"),
+            type="contact",
+            name=contact["properties"].get("firstname", "Unknown") + " " + contact["properties"].get("lastname", ""),
+            creation_time=contact["createdAt"],
+            last_modified_time=contact["updatedAt"],
+            parent_id=None
+        )
+        for contact in contacts
+    ]
 
-
-async def clear_hubspot_data(user_id, org_id):
-    """
-    Clear stored HubSpot credentials and integration data.
-    """
-    await delete_key_redis(f'hubspot_credentials:{org_id}:{user_id}')
-    return {"message": "HubSpot data cleared successfully"}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# async def refresh_hubspot_token(user_id, org_id):
-#     """
-#     Refresh HubSpot OAuth token if expired.
-#     """
-#     credentials = await get_hubspot_credentials(user_id, org_id)
-#     refresh_token = credentials.get("refresh_token")
-
-#     if not refresh_token:
-#         raise HTTPException(status_code=400, detail="No refresh token available.")
-
-#     async with httpx.AsyncClient() as client:
-#         response = await client.post(
-#             TOKEN_URL,
-#             data={
-#                 'grant_type': 'refresh_token',
-#                 'client_id': CLIENT_ID,
-#                 'client_secret': CLIENT_SECRET,
-#                 'refresh_token': refresh_token
-#             },
-#             headers={'Content-Type': 'application/x-www-form-urlencoded'}
-#         )
-
-#     if response.status_code != 200:
-#         raise HTTPException(status_code=response.status_code, detail="Failed to refresh access token")
-
-#     new_credentials = response.json()
-#     await add_key_value_redis(f'hubspot_credentials:{org_id}:{user_id}', json.dumps(new_credentials), expire=new_credentials.get("expires_in", 3600))
-
-#     return new_credentials
-
-
-# async def create_integration_item_metadata_object(response_json):
-#     """
-#     Create an IntegrationItem metadata object from HubSpot response.
-#     """
-#     print(response_json, 'res-->')
-
-#     return IntegrationItem(
-#         id=response_json.get("id"),
-#         name=f"{response_json.get('properties', {}).get('firstname', 'Unknown')} {response_json.get('properties', {}).get('lastname', '')}".strip(),
-#         created_at=response_json.get("properties", {}).get("createdate"),  # FIX: Get from properties
-#         updated_at=response_json.get("properties", {}).get("lastmodifieddate"),  # FIX: Get from properties
-#         properties=response_json.get("properties", {}),
-#     )
-
-
-
-# async def get_items_hubspot(credentials: str):
-#     """
-#     Fetch contacts from HubSpot using stored credentials.
-#     """
-#     try:
-#         # Parse the credentials JSON string to extract user_id and org_id
-#         credentials_dict = json.loads(credentials)
-#         user_id = credentials_dict.get("user_id")
-#         org_id = credentials_dict.get("org_id")
-
-#         if not user_id or not org_id:
-#             raise HTTPException(status_code=400, detail="Missing user_id or org_id in credentials")
-
-#         # Retrieve stored credentials from Redis
-#         stored_credentials = await get_hubspot_credentials(user_id, org_id)
-#         access_token = stored_credentials.get("access_token")
-
-#         if not access_token:
-#             raise HTTPException(status_code=401, detail="Invalid access token. Try reauthorizing.")
-
-#         async with httpx.AsyncClient() as client:
-#             response = await client.get(
-#                 "https://api.hubapi.com/crm/v3/objects/contacts",
-#                 headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-#             )
-
-#             # Handle token expiration
-#             if response.status_code == 401:
-#                 stored_credentials = await refresh_hubspot_token(user_id, org_id)
-#                 access_token = stored_credentials.get("access_token")
-
-#                 response = await client.get(
-#                     "https://api.hubapi.com/crm/v3/objects/contacts",
-#                     headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
-#                 )
-
-#         if response.status_code != 200:
-#             raise HTTPException(status_code=response.status_code, detail="Failed to fetch items from HubSpot")
-
-#         return [await create_integration_item_metadata_object(item) for item in response.json().get("results", [])]
-
-#     except json.JSONDecodeError:
-#         raise HTTPException(status_code=400, detail="Invalid credentials format. Expected JSON string.")
+    return list_of_integration_item_metadata
